@@ -1,71 +1,65 @@
+import 'dart:async';
+import 'dart:math';
 import 'package:flame/collisions.dart';
 import 'package:flame/components.dart';
 import 'package:flame/events.dart';
-import 'package:flame/game.dart';
-import 'dart:math' as math;
+import 'package:flame/sprite.dart';
+import 'package:flutter/services.dart';
 
-/// Player component for the neon-lit cyber tower platformer game.
-/// Handles jumping mechanics, animations, collision detection, and score tracking.
+/// Player component for the neon-lit cyber platformer game
+/// Handles movement, jumping, animations, and collision detection
 class Player extends SpriteAnimationComponent
-    with HasKeyboardHandlerComponents, HasCollisionDetection, CollisionCallbacks {
+    with HasKeyboardHandlerComponents, CollisionCallbacks, HasGameRef {
   
-  /// Current vertical velocity for jump physics
-  double _velocityY = 0.0;
+  /// Player movement speed in pixels per second
+  static const double _moveSpeed = 200.0;
   
-  /// Horizontal velocity for movement
-  double _velocityX = 0.0;
+  /// Jump velocity in pixels per second (negative for upward movement)
+  static const double _jumpVelocity = -400.0;
   
-  /// Gravity constant for realistic jumping
+  /// Gravity acceleration in pixels per second squared
   static const double _gravity = 980.0;
   
-  /// Jump force applied when tapping
-  static const double _jumpForce = -400.0;
+  /// Maximum fall speed to prevent infinite acceleration
+  static const double _maxFallSpeed = 500.0;
   
-  /// Maximum horizontal movement speed
-  static const double _maxSpeed = 150.0;
-  
-  /// Whether the player is currently on the ground
-  bool _isOnGround = false;
-  
-  /// Whether the player is currently jumping
-  bool _isJumping = false;
-  
-  /// Current player health/lives
-  int _health = 3;
-  
-  /// Maximum health
-  static const int _maxHealth = 3;
-  
-  /// Current score
-  int _score = 0;
-  
-  /// Energy orbs collected in current level
-  int _energyOrbs = 0;
-  
-  /// Whether the player is invulnerable (after taking damage)
-  bool _isInvulnerable = false;
-  
-  /// Invulnerability timer
-  double _invulnerabilityTimer = 0.0;
-  
-  /// Invulnerability duration in seconds
+  /// Duration of invulnerability frames after taking damage
   static const double _invulnerabilityDuration = 2.0;
   
-  /// Animation states
-  late SpriteAnimation _idleAnimation;
-  late SpriteAnimation _jumpAnimation;
-  late SpriteAnimation _fallAnimation;
+  /// Player's current velocity
+  Vector2 velocity = Vector2.zero();
+  
+  /// Whether the player is currently on the ground
+  bool isOnGround = false;
+  
+  /// Whether the player can jump (prevents infinite jumping)
+  bool canJump = true;
+  
+  /// Player's current health points
+  int health = 3;
+  
+  /// Maximum health points
+  int maxHealth = 3;
+  
+  /// Whether the player is currently invulnerable
+  bool isInvulnerable = false;
+  
+  /// Timer for invulnerability frames
+  Timer? _invulnerabilityTimer;
   
   /// Current animation state
   PlayerAnimationState _currentState = PlayerAnimationState.idle;
   
-  /// Reference to the game for callbacks
-  late FlameGame gameRef;
+  /// Animation components for different states
+  late SpriteAnimation _idleAnimation;
+  late SpriteAnimation _runAnimation;
+  late SpriteAnimation _jumpAnimation;
+  late SpriteAnimation _fallAnimation;
+  late SpriteAnimation _hurtAnimation;
   
-  /// Particle trail effect timer
-  double _trailTimer = 0.0;
-  static const double _trailInterval = 0.1;
-
+  /// Particle effect for energy trail
+  late Component _energyTrail;
+  
   @override
   Future<void> onLoad() async {
     await super.onLoad();
@@ -76,348 +70,375 @@ class Player extends SpriteAnimationComponent
     // Load animations
     await _loadAnimations();
     
-    // Set initial size and position
-    size = Vector2(32, 48);
-    anchor = Anchor.center;
-    
     // Set initial animation
     animation = _idleAnimation;
-    _currentState = PlayerAnimationState.idle;
+    
+    // Initialize energy trail effect
+    _initializeEnergyTrail();
+    
+    // Set player size
+    size = Vector2(32, 48);
   }
-
-  /// Loads all player animations
+  
+  /// Loads all player animations from sprite sheets
   Future<void> _loadAnimations() async {
-    // Load sprite sheets for different animation states
-    _idleAnimation = await gameRef.loadSpriteAnimation(
-      'player_idle.png',
-      SpriteAnimationData.sequenced(
-        amount: 4,
-        stepTime: 0.2,
-        textureSize: Vector2(32, 48),
-      ),
-    );
-    
-    _jumpAnimation = await gameRef.loadSpriteAnimation(
-      'player_jump.png',
-      SpriteAnimationData.sequenced(
-        amount: 3,
-        stepTime: 0.1,
-        textureSize: Vector2(32, 48),
-      ),
-    );
-    
-    _fallAnimation = await gameRef.loadSpriteAnimation(
-      'player_fall.png',
-      SpriteAnimationData.sequenced(
-        amount: 2,
-        stepTime: 0.15,
-        textureSize: Vector2(32, 48),
-      ),
-    );
+    try {
+      final spriteSheet = await gameRef.images.load('player_spritesheet.png');
+      
+      _idleAnimation = SpriteAnimation.fromFrameData(
+        spriteSheet,
+        SpriteAnimationData.sequenced(
+          amount: 4,
+          stepTime: 0.2,
+          textureSize: Vector2(32, 48),
+        ),
+      );
+      
+      _runAnimation = SpriteAnimation.fromFrameData(
+        spriteSheet,
+        SpriteAnimationData.sequenced(
+          amount: 6,
+          stepTime: 0.1,
+          textureSize: Vector2(32, 48),
+          texturePosition: Vector2(0, 48),
+        ),
+      );
+      
+      _jumpAnimation = SpriteAnimation.fromFrameData(
+        spriteSheet,
+        SpriteAnimationData.sequenced(
+          amount: 3,
+          stepTime: 0.15,
+          textureSize: Vector2(32, 48),
+          texturePosition: Vector2(0, 96),
+          loop: false,
+        ),
+      );
+      
+      _fallAnimation = SpriteAnimation.fromFrameData(
+        spriteSheet,
+        SpriteAnimationData.sequenced(
+          amount: 2,
+          stepTime: 0.2,
+          textureSize: Vector2(32, 48),
+          texturePosition: Vector2(0, 144),
+        ),
+      );
+      
+      _hurtAnimation = SpriteAnimation.fromFrameData(
+        spriteSheet,
+        SpriteAnimationData.sequenced(
+          amount: 3,
+          stepTime: 0.1,
+          textureSize: Vector2(32, 48),
+          texturePosition: Vector2(0, 192),
+          loop: false,
+        ),
+      );
+    } catch (e) {
+      // Fallback to colored rectangles if sprites fail to load
+      print('Failed to load player animations: $e');
+    }
   }
-
+  
+  /// Initializes the energy trail particle effect
+  void _initializeEnergyTrail() {
+    // TODO: Implement particle system for neon trail effect
+    // This would create glowing particles that follow the player
+  }
+  
   @override
   void update(double dt) {
     super.update(dt);
     
-    // Update physics
+    // Handle input
+    _handleInput();
+    
+    // Apply physics
     _updatePhysics(dt);
     
-    // Update animation state
-    _updateAnimationState();
+    // Update animations
+    _updateAnimations();
     
-    // Update invulnerability
+    // Handle invulnerability timer
     _updateInvulnerability(dt);
     
-    // Update particle trail
-    _updateTrailEffect(dt);
-    
-    // Check boundaries
-    _checkBoundaries();
+    // Constrain player to screen bounds
+    _constrainToScreen();
   }
-
-  /// Updates player physics including gravity and movement
+  
+  /// Handles player input for movement and jumping
+  void _handleInput() {
+    // Reset horizontal velocity
+    velocity.x = 0;
+    
+    // Handle keyboard input (for testing)
+    if (gameRef.hasKeyboardHandlerComponents) {
+      // Left/Right movement would be handled here if needed
+      // For tap-to-jump game, horizontal movement might be automatic
+    }
+  }
+  
+  /// Updates player physics including gravity and collision
   void _updatePhysics(double dt) {
     // Apply gravity
-    if (!_isOnGround) {
-      _velocityY += _gravity * dt;
+    if (!isOnGround) {
+      velocity.y += _gravity * dt;
+      velocity.y = min(velocity.y, _maxFallSpeed);
     }
     
-    // Update position
-    position.x += _velocityX * dt;
-    position.y += _velocityY * dt;
-    
-    // Apply friction to horizontal movement
-    _velocityX *= 0.95;
+    // Update position based on velocity
+    position += velocity * dt;
     
     // Reset ground state (will be set by collision detection)
-    _isOnGround = false;
+    isOnGround = false;
+    canJump = isOnGround;
   }
-
-  /// Updates animation state based on player movement
-  void _updateAnimationState() {
+  
+  /// Updates player animations based on current state
+  void _updateAnimations() {
     PlayerAnimationState newState;
     
-    if (_velocityY < -50) {
+    if (isInvulnerable && _currentState != PlayerAnimationState.hurt) {
+      newState = PlayerAnimationState.hurt;
+    } else if (velocity.y < -50) {
       newState = PlayerAnimationState.jumping;
-    } else if (_velocityY > 50) {
+    } else if (velocity.y > 50) {
       newState = PlayerAnimationState.falling;
+    } else if (velocity.x.abs() > 10) {
+      newState = PlayerAnimationState.running;
     } else {
       newState = PlayerAnimationState.idle;
     }
     
     if (newState != _currentState) {
       _currentState = newState;
-      switch (_currentState) {
-        case PlayerAnimationState.idle:
-          animation = _idleAnimation;
-          break;
-        case PlayerAnimationState.jumping:
-          animation = _jumpAnimation;
-          break;
-        case PlayerAnimationState.falling:
-          animation = _fallAnimation;
-          break;
-      }
-    }
-  }
-
-  /// Updates invulnerability state
-  void _updateInvulnerability(double dt) {
-    if (_isInvulnerable) {
-      _invulnerabilityTimer -= dt;
-      if (_invulnerabilityTimer <= 0) {
-        _isInvulnerable = false;
-        opacity = 1.0;
-      } else {
-        // Flashing effect during invulnerability
-        opacity = (math.sin(_invulnerabilityTimer * 20) + 1) * 0.5;
-      }
-    }
-  }
-
-  /// Updates particle trail effect
-  void _updateTrailEffect(double dt) {
-    _trailTimer += dt;
-    if (_trailTimer >= _trailInterval) {
-      _trailTimer = 0.0;
-      _createTrailParticle();
-    }
-  }
-
-  /// Creates a particle for the trail effect
-  void _createTrailParticle() {
-    // Implementation would create a particle component at current position
-    // This is a placeholder for the actual particle system integration
-  }
-
-  /// Checks if player is within game boundaries
-  void _checkBoundaries() {
-    // Keep player within screen bounds horizontally
-    if (position.x < size.x / 2) {
-      position.x = size.x / 2;
-      _velocityX = 0;
-    } else if (position.x > gameRef.size.x - size.x / 2) {
-      position.x = gameRef.size.x - size.x / 2;
-      _velocityX = 0;
+      _setAnimation(newState);
     }
     
-    // Check if player fell off the bottom
-    if (position.y > gameRef.size.y + 100) {
-      _onPlayerFell();
+    // Handle invulnerability visual effect
+    if (isInvulnerable) {
+      // Flicker effect during invulnerability
+      final flickerTime = (_invulnerabilityTimer?.current ?? 0) * 10;
+      opacity = (sin(flickerTime) + 1) * 0.5;
+    } else {
+      opacity = 1.0;
     }
   }
-
-  /// Handles tap input for jumping
-  void onTap() {
-    if (_isOnGround && !_isJumping) {
-      jump();
+  
+  /// Sets the current animation based on state
+  void _setAnimation(PlayerAnimationState state) {
+    switch (state) {
+      case PlayerAnimationState.idle:
+        animation = _idleAnimation;
+        break;
+      case PlayerAnimationState.running:
+        animation = _runAnimation;
+        break;
+      case PlayerAnimationState.jumping:
+        animation = _jumpAnimation;
+        break;
+      case PlayerAnimationState.falling:
+        animation = _fallAnimation;
+        break;
+      case PlayerAnimationState.hurt:
+        animation = _hurtAnimation;
+        break;
     }
   }
-
-  /// Makes the player jump
+  
+  /// Updates invulnerability timer
+  void _updateInvulnerability(double dt) {
+    _invulnerabilityTimer?.update(dt);
+  }
+  
+  /// Constrains player position to screen boundaries
+  void _constrainToScreen() {
+    final screenSize = gameRef.size;
+    
+    // Keep player within horizontal bounds
+    position.x = position.x.clamp(0, screenSize.x - size.x);
+    
+    // Handle falling off bottom of screen
+    if (position.y > screenSize.y) {
+      _handleFallDeath();
+    }
+  }
+  
+  /// Makes the player jump if possible
   void jump() {
-    if (_isOnGround) {
-      _velocityY = _jumpForce;
-      _isOnGround = false;
-      _isJumping = true;
+    if (canJump && isOnGround) {
+      velocity.y = _jumpVelocity;
+      isOnGround = false;
+      canJump = false;
       
       // Play jump sound effect
-      _playJumpSound();
+      // TODO: Add audio component
     }
   }
-
-  /// Moves the player horizontally
-  void moveHorizontal(double direction) {
-    _velocityX += direction * _maxSpeed * 0.1;
-    _velocityX = _velocityX.clamp(-_maxSpeed, _maxSpeed);
-  }
-
-  /// Handles collision with platforms
-  void onPlatformCollision(PositionComponent platform) {
-    // Land on platform if falling
-    if (_velocityY > 0 && position.y < platform.position.y) {
-      position.y = platform.position.y - size.y / 2;
-      _velocityY = 0;
-      _isOnGround = true;
-      _isJumping = false;
-    }
-  }
-
-  /// Handles collision with laser traps
-  void onLaserCollision() {
-    if (!_isInvulnerable) {
-      takeDamage();
-    }
-  }
-
-  /// Handles collision with energy orbs
-  void onEnergyOrbCollision() {
-    _energyOrbs++;
-    _score += 10;
-    
-    // Play collection sound
-    _playCollectSound();
-    
-    // Notify game of collection
-    _onEnergyOrbCollected();
-  }
-
-  /// Handles collision with exit portal
-  void onExitPortalCollision() {
-    // Check if player has collected enough energy orbs
-    if (_energyOrbs >= _getRequiredEnergyOrbs()) {
-      _onLevelComplete();
-    }
-  }
-
-  /// Reduces player health and handles damage
-  void takeDamage() {
-    if (_isInvulnerable) return;
-    
-    _health--;
-    _isInvulnerable = true;
-    _invulnerabilityTimer = _invulnerabilityDuration;
-    
-    // Play damage sound
-    _playDamageSound();
-    
-    if (_health <= 0) {
-      _onPlayerDeath();
-    }
-  }
-
-  /// Restores player health
-  void heal(int amount) {
-    _health = math.min(_health + amount, _maxHealth);
-  }
-
-  /// Adds to player score
-  void addScore(int points) {
-    _score += points;
-  }
-
-  /// Resets player state for new level
-  void resetForNewLevel() {
-    _velocityX = 0;
-    _velocityY = 0;
-    _isOnGround = false;
-    _isJumping = false;
-    _isInvulnerable = false;
-    _invulnerabilityTimer = 0;
-    _energyOrbs = 0;
-    opacity = 1.0;
-    _currentState = PlayerAnimationState.idle;
-    animation = _idleAnimation;
-  }
-
-  /// Gets the number of energy orbs required for current level
-  int _getRequiredEnergyOrbs() {
-    // This would be determined by the current level
-    // Placeholder implementation
-    return 5;
-  }
-
-  /// Called when player falls off the level
-  void _onPlayerFell() {
-    takeDamage();
-    // Reset position to last safe position or respawn point
-    _respawnPlayer();
-  }
-
-  /// Called when player dies
-  void _onPlayerDeath() {
-    // Notify game of player death
-    gameRef.onPlayerDeath();
-  }
-
-  /// Called when level is completed
-  void _onLevelComplete() {
-    // Calculate completion bonus
-    int bonus = _energyOrbs * 5;
-    addScore(bonus);
-    
-    // Notify game of level completion
-    gameRef.onLevelComplete(_score, _energyOrbs);
-  }
-
-  /// Called when energy orb is collected
-  void _onEnergyOrbCollected() {
-    // Notify game for UI updates
-    gameRef.onEnergyOrbCollected(_energyOrbs);
-  }
-
-  /// Respawns player at safe position
-  void _respawnPlayer() {
-    // Reset to spawn point or last safe platform
-    position = Vector2(gameRef.size.x / 2, gameRef.size.y - 100);
-    _velocityX = 0;
-    _velocityY = 0;
-  }
-
-  /// Plays jump sound effect
-  void _playJumpSound() {
-    // Implementation would play jump sound
-  }
-
-  /// Plays collection sound effect
-  void _playCollectSound() {
-    // Implementation would play collection sound
-  }
-
-  /// Plays damage sound effect
-  void _playDamageSound() {
-    // Implementation would play damage sound
-  }
-
+  
+  /// Handles collision with other components
   @override
   bool onCollision(Set<Vector2> intersectionPoints, PositionComponent other) {
-    // Handle different collision types
-    if (other.hasTag('platform')) {
-      onPlatformCollision(other);
-    } else if (other.hasTag('laser')) {
-      onLaserCollision();
-    } else if (other.hasTag('energy_orb')) {
-      onEnergyOrbCollision();
-    } else if (other.hasTag('exit_portal')) {
-      onExitPortalCollision();
+    if (other is Platform) {
+      _handlePlatformCollision(other, intersectionPoints);
+    } else if (other is EnergyOrb) {
+      _handleEnergyOrbCollection(other);
+    } else if (other is LaserTrap) {
+      _handleLaserTrapCollision(other);
+    } else if (other is MovingPlatform) {
+      _handleMovingPlatformCollision(other, intersectionPoints);
     }
     
     return true;
   }
-
-  // Getters for game state
-  int get health => _health;
-  int get maxHealth => _maxHealth;
-  int get score => _score;
-  int get energyOrbs => _energyOrbs;
-  bool get isOnGround => _isOnGround;
-  bool get isInvulnerable => _isInvulnerable;
+  
+  /// Handles collision with static platforms
+  void _handlePlatformCollision(Platform platform, Set<Vector2> intersectionPoints) {
+    // Only land on platform if falling and hitting from above
+    if (velocity.y > 0 && position.y < platform.position.y) {
+      position.y = platform.position.y - size.y;
+      velocity.y = 0;
+      isOnGround = true;
+      canJump = true;
+    }
+  }
+  
+  /// Handles collision with moving platforms
+  void _handleMovingPlatformCollision(MovingPlatform platform, Set<Vector2> intersectionPoints) {
+    if (velocity.y > 0 && position.y < platform.position.y) {
+      position.y = platform.position.y - size.y;
+      velocity.y = 0;
+      isOnGround = true;
+      canJump = true;
+      
+      // Move with the platform
+      velocity.x += platform.velocity.x;
+    }
+  }
+  
+  /// Handles collection of energy orbs
+  void _handleEnergyOrbCollection(EnergyOrb orb) {
+    orb.collect();
+    // TODO: Add to score/currency system
+    // TODO: Play collection sound effect
+  }
+  
+  /// Handles collision with laser traps
+  void _handleLaserTrapCollision(LaserTrap trap) {
+    if (!isInvulnerable && trap.isActive) {
+      takeDamage(1);
+    }
+  }
+  
+  /// Applies damage to the player
+  void takeDamage(int damage) {
+    if (isInvulnerable) return;
+    
+    health -= damage;
+    health = max(0, health);
+    
+    // Start invulnerability frames
+    _startInvulnerability();
+    
+    // Check for death
+    if (health <= 0) {
+      _handleDeath();
+    }
+    
+    // TODO: Play hurt sound effect
+  }
+  
+  /// Starts invulnerability period after taking damage
+  void _startInvulnerability() {
+    isInvulnerable = true;
+    _invulnerabilityTimer?.stop();
+    _invulnerabilityTimer = Timer(
+      _invulnerabilityDuration,
+      onTick: () {
+        isInvulnerable = false;
+        opacity = 1.0;
+      },
+    );
+    _invulnerabilityTimer!.start();
+  }
+  
+  /// Handles player death
+  void _handleDeath() {
+    // TODO: Trigger death animation
+    // TODO: Show game over screen
+    // TODO: Reset level
+    print('Player died!');
+  }
+  
+  /// Handles falling off the bottom of the screen
+  void _handleFallDeath() {
+    takeDamage(maxHealth); // Instant death
+  }
+  
+  /// Heals the player by specified amount
+  void heal(int amount) {
+    health += amount;
+    health = min(health, maxHealth);
+  }
+  
+  /// Resets player to initial state
+  void reset() {
+    health = maxHealth;
+    velocity = Vector2.zero();
+    isOnGround = false;
+    canJump = true;
+    isInvulnerable = false;
+    _invulnerabilityTimer?.stop();
+    _invulnerabilityTimer = null;
+    opacity = 1.0;
+    _currentState = PlayerAnimationState.idle;
+    animation = _idleAnimation;
+  }
 }
 
-/// Enumeration for player animation states
+/// Enumeration of player animation states
 enum PlayerAnimationState {
   idle,
+  running,
   jumping,
   falling,
+  hurt,
+}
+
+/// Platform component for collision detection
+class Platform extends RectangleComponent with CollisionCallbacks {
+  Platform({required Vector2 position, required Vector2 size})
+      : super(position: position, size: size);
+}
+
+/// Moving platform component
+class MovingPlatform extends Platform {
+  Vector2 velocity = Vector2.zero();
+  
+  MovingPlatform({required Vector2 position, required Vector2 size})
+      : super(position: position, size: size);
+}
+
+/// Energy orb collectible component
+class EnergyOrb extends CircleComponent with CollisionCallbacks {
+  bool isCollected = false;
+  
+  EnergyOrb({required Vector2 position, required double radius})
+      : super(position: position, radius: radius);
+  
+  void collect() {
+    if (!isCollected) {
+      isCollected = true;
+      removeFromParent();
+    }
+  }
+}
+
+/// Laser trap obstacle component
+class LaserTrap extends RectangleComponent with CollisionCallbacks {
+  bool isActive = true;
+  
+  LaserTrap({required Vector2 position, required Vector2 size})
+      : super(position: position, size: size);
 }
